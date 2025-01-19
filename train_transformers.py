@@ -310,7 +310,13 @@ optimizer = torch.optim.AdamW(
     weight_decay=0.1
 )
 
-scaler = GradScaler()
+# First, modify the scaler initialization based on device
+if device == 'cuda':
+    scaler = GradScaler()
+    use_scaler = True
+else:
+    use_scaler = False
+    scaler = None
 
 # Better learning rate scheduler
 scheduler = OneCycleLR(
@@ -370,8 +376,8 @@ for epoch in trange(num_epochs, desc="Training", unit="epoch"):
     optimizer.zero_grad(set_to_none=True)
     accumulated_loss = 0
     
-    print(f"\nEpoch {epoch+1}/{num_epochs}")
-    print("=" * 50)
+    # print(f"\nEpoch {epoch+1}/{num_epochs}")
+    # print("=" * 50)
     
     # Create step progress bar
     pbar = tqdm(range(steps_per_epoch), desc=f"Epoch {epoch+1}", 
@@ -384,35 +390,35 @@ for epoch in trange(num_epochs, desc="Training", unit="epoch"):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
         
-        # For MPS/CPU training, modify the autocast context
-        if device == 'cuda':
-            ctx_manager = autocast(device_type='cuda')
+        # Forward pass
+        if use_scaler:
+            with autocast(device_type='cuda'):
+                logits, loss = model(x, y)
+                loss = loss / accumulation_steps
+            # Backward pass with scaling
+            scaler.scale(loss).backward()
         else:
-            ctx_manager = autocast(device_type='cpu')
-        
-        # Forward pass with gradient scaling
-        with ctx_manager:
+            # Regular forward and backward pass for CPU/MPS
             logits, loss = model(x, y)
             loss = loss / accumulation_steps
-        
-        # Backward pass with gradient scaling
-        scaler.scale(loss).backward()
+            loss.backward()
+            
         accumulated_loss += loss.item()
         
         # Step optimizer after accumulation
         if (step + 1) % accumulation_steps == 0:
-            # Unscale gradients for clipping
-            scaler.unscale_(optimizer)
+            if use_scaler:
+                # Unscale and clip gradients
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                # Step with scaler
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Regular gradient clipping and optimizer step
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                optimizer.step()
             
-            # Clip gradients
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), 
-                max_norm=0.5
-            )
-            
-            # Optimizer and scheduler step
-            scaler.step(optimizer)
-            scaler.update()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
             
