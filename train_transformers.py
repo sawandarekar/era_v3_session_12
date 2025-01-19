@@ -390,34 +390,42 @@ for epoch in trange(num_epochs, desc="Training", unit="epoch"):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
         
-        # Forward pass
-        if use_scaler:
-            with autocast(device_type='cuda'):
-                logits, loss = model(x, y)
-                loss = loss / accumulation_steps
-            # Backward pass with scaling
-            scaler.scale(loss).backward()
-        else:
-            # Regular forward and backward pass for CPU/MPS
-            logits, loss = model(x, y)
-            loss = loss / accumulation_steps
-            loss.backward()
+        # # Forward pass
+        # if use_scaler:
+        #     with autocast(device_type='cuda'):
+        #         logits, loss = model(x, y)
+        #         loss = loss / accumulation_steps
+        #     # Backward pass with scaling
+        #     scaler.scale(loss).backward()
+        # else:
+        #     # Regular forward and backward pass for CPU/MPS
+        #     logits, loss = model(x, y)
+        #     loss = loss / accumulation_steps
+        #     loss.backward()
+
+        # Regular forward and backward pass for CPU/MPS
+        logits, loss = model(x, y)
+        loss = loss / accumulation_steps
+        loss.backward()
             
         accumulated_loss += loss.item()
         
         # Step optimizer after accumulation
         if (step + 1) % accumulation_steps == 0:
-            if use_scaler:
-                # Unscale and clip gradients
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-                # Step with scaler
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                # Regular gradient clipping and optimizer step
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-                optimizer.step()
+            # if use_scaler:
+            #     # Unscale and clip gradients
+            #     scaler.unscale_(optimizer)
+            #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            #     # Step with scaler
+            #     scaler.step(optimizer)
+            #     scaler.update()
+            # else:
+            #     # Regular gradient clipping and optimizer step
+            #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            #     optimizer.step()
+            
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            optimizer.step()
             
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
