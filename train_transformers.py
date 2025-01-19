@@ -357,8 +357,10 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
                                                           T_max=num_epochs * steps_per_epoch,
                                                           eta_min=1e-5)
 for epoch in range(num_epochs):
+        epoch_time = time.time()
         epoch_loss = 0
         for step in range(steps_per_epoch):
+            step_time = time.time()
             x, y = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
@@ -370,12 +372,14 @@ for epoch in range(num_epochs):
             epoch_loss += loss.item()
             
             if step % 10 == 0:  # Print every 10 steps
-                print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, Loss: {loss.item():.4f}')
+                dt = time.time() - step_time
+                print(f'Epoch {epoch+1}/{num_epochs} | Step {step}/{steps_per_epoch} | Loss: {loss.item():.4f} | time: {dt:.2f}s')
         
         # Print epoch summary
+        dt = time.time() - epoch_time
         avg_loss = epoch_loss / steps_per_epoch
-        print(f'\nEpoch {epoch+1} Summary:')
-        print(f'Average Loss: {avg_loss:.4f}\n')
+        print(f'\nEpoch {epoch+1} Average Loss: {avg_loss:.4f} | time: {dt:.2f}s\n')
+        
         
         # Save best model
         if avg_loss < best_loss:
