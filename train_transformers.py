@@ -284,8 +284,9 @@ def count_parameters(model):
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total_params, trainable_params
 
-
-
+max_lr = 6e-4 
+min_lr = max_lr * 0.1
+warmup_steps = 10
 target_loss = 0.099999
 best_loss = float('inf')
 
@@ -301,6 +302,19 @@ train_loader = DataLoaderLite(B=batch_size, T=context_length)
 num_epochs = 10  # Define number of epochs
 steps_per_epoch = len(train_loader.tokens) // (train_loader.B * train_loader.T)
 
+def get_lr(it):
+    if it < warmup_steps:
+        return max_lr * (it + 1) / warmup_steps
+    if it > num_epochs:
+        return min_lr
+    decay_ratio = (it - warmup_steps) / (num_epochs - warmup_steps)
+    assert 0 <= decay_ratio <=1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (max_lr - min_lr)
+
+
+
+
 # Create optimizer with modified parameters
 optimizer = torch.optim.AdamW(
     model.parameters(),
@@ -314,9 +328,11 @@ optimizer = torch.optim.AdamW(
 if device == 'cuda':
     scaler = GradScaler()
     use_scaler = True
+    ctx_manager = autocast(device_type='cuda')
 else:
-    use_scaler = False
     scaler = None
+    use_scaler = False
+    ctx_manager = autocast(device_type='cpu')
 
 # Better learning rate scheduler
 scheduler = OneCycleLR(
@@ -360,93 +376,62 @@ print(f"Non-trainable Parameters: {total_params - trainable_params:,}")
 print("=" * 50)
 
 # Add before training loop
-def format_time(seconds):
+rmat_time(seconds):
     """Convert seconds to human readable string"""
-    return str(timedelta(seconds=int(seconds)))
+    return str(timedelta(seconds=int(seconds)))def fo
 
 # Modified training loop with timing
 print(f"\nStarting training at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 training_start = time.time()
 
 # Create epoch progress bar
-for epoch in trange(num_epochs, desc="Training", unit="epoch"):
+for epoch in range(num_epochs):
     epoch_start = time.time()
     model.train()
     epoch_loss = 0
     optimizer.zero_grad(set_to_none=True)
     accumulated_loss = 0
     
-    # print(f"\nEpoch {epoch+1}/{num_epochs}")
-    # print("=" * 50)
-    
-    # Create step progress bar
-    pbar = tqdm(range(steps_per_epoch), desc=f"Epoch {epoch+1}", 
-                leave=False, unit="batch")
-    
-    for step in pbar:
+    for step in range(steps_per_epoch):
         step_start = time.time()
+        t0 = time.time()  # Add this line to define t0
         
-        # Get batch
         x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
+        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         
-        # # Forward pass
-        # if use_scaler:
-        #     with autocast(device_type='cuda'):
-        #         logits, loss = model(x, y)
-        #         loss = loss / accumulation_steps
-        #     # Backward pass with scaling
-        #     scaler.scale(loss).backward()
-        # else:
-        #     # Regular forward and backward pass for CPU/MPS
-        #     logits, loss = model(x, y)
-        #     loss = loss / accumulation_steps
-        #     loss.backward()
-
-        # Regular forward and backward pass for CPU/MPS
-        logits, loss = model(x, y)
-        loss = loss / accumulation_steps
-        loss.backward()
-            
-        accumulated_loss += loss.item()
+        optimizer.zero_grad(set_to_none=True)
         
-        # Step optimizer after accumulation
-        if (step + 1) % accumulation_steps == 0:
-            # if use_scaler:
-            #     # Unscale and clip gradients
-            #     scaler.unscale_(optimizer)
-            #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-            #     # Step with scaler
-            #     scaler.step(optimizer)
-            #     scaler.update()
-            # else:
-            #     # Regular gradient clipping and optimizer step
-            #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-            #     optimizer.step()
-            
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+        # Forward pass
+        with ctx_manager:
+            logits, loss = model(x, y)
+        
+        # Backward pass and optimization
+        if use_scaler:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            
-            scheduler.step()
-            optimizer.zero_grad(set_to_none=True)
-            
-            # Update metrics
-            epoch_loss += accumulated_loss
-            accumulated_loss = 0
-            
-            # Update progress bar
-            current_lr = scheduler.get_last_lr()[0]
-            elapsed = time.time() - training_start
-            remaining = (elapsed / (epoch * steps_per_epoch + step + 1)) * \
-                       (num_epochs * steps_per_epoch - (epoch * steps_per_epoch + step + 1))
-            
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'lr': f'{current_lr:.2e}',
-                'elapsed': format_time(elapsed),
-                'remaining': format_time(remaining)
-            })
-
+        
+        # Learning rate adjustment
+        lr = get_lr(step)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        
+        # Metrics
+        current_loss = loss.item()
+        best_loss = min(best_loss, current_loss)
+        t1 = time.time()
+        dt = (t1 - t0) * 1000
+        tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - step_start)
+        
+        # Logging
+        print(f'step {step:4d} | loss: {current_loss:.4f} | dt: {dt:.2f}ms | tok/sec: {tokens_per_sec:.2f} | norm: {norm:.2f} | lr: {lr:.2e}')
+        
     # Calculate average loss and epoch timing
     epoch_time = time.time() - epoch_start
     avg_loss = epoch_loss / (steps_per_epoch / accumulation_steps)

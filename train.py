@@ -332,8 +332,11 @@ for epoch in range(num_epochs):
             loss.backward()
             optimizer.step()
             current_loss = loss.item()
-            best_loss = min(best_loss, current_loss)
-            if step % 100 == 0:  # Print every 10 steps
+            epoch_loss += current_loss
+            
+            # best_loss = min(best_loss, current_loss)
+            
+            if step % 10 == 0:  # Print every 100 steps
                 print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, Loss: {loss.item():.4f}')
         
         avg_loss = epoch_loss / steps_per_epoch
