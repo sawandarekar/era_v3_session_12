@@ -11,6 +11,8 @@ from torch.amp import autocast, GradScaler  # Add GradScaler back
 from pathlib import Path
 import io
 import zipfile
+import pickle
+import gzip
 
 
 class CausalSelfAttention(nn.Module):
@@ -191,6 +193,27 @@ class GPT(nn.Module):
 
         return model
 
+
+def save_compressed_model(model, path):
+    """Save model with compression"""
+    state_dict = model.state_dict()
+    # Convert tensors to half precision
+    for key in state_dict:
+        if state_dict[key].dtype == torch.float32:
+            state_dict[key] = state_dict[key].half()
+    # Compress and save
+    with gzip.open(path, 'wb', compresslevel=9) as f:
+        pickle.dump(state_dict, f)
+
+def load_compressed_model(model, path):
+    """Load compressed model"""
+    with gzip.open(path, 'rb') as f:
+        state_dict = pickle.load(f)
+    # Convert back to float32 for training
+    for key in state_dict:
+        if state_dict[key].dtype == torch.float16:
+            state_dict[key] = state_dict[key].float()
+    model.load_state_dict(state_dict)
 # model = GPT.from_pretrained('gpt2')
 
 device = 'cpu'
@@ -246,26 +269,14 @@ class DataLoaderLite:
 model = GPT(GPTConfig())
 model.to(device)
 
+
 # Print model architecture and parameter count
 def count_parameters(model):
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total_params, trainable_params
 
-total_params, trainable_params = count_parameters(model)
 
-print("\nModel Architecture:")
-print("=" * 50)
-print(model)
-print("\nParameter Count:")
-print("=" * 50)
-print(f"Total Parameters: {total_params:,}")
-print(f"Trainable Parameters: {trainable_params:,}")
-print(f"Non-trainable Parameters: {total_params - trainable_params:,}")
-print("=" * 50)
-
-# Continue with existing code
-train_loader = DataLoaderLite(B=32, T=64)  # Increased from B=4, T=32
 
 target_loss = 0.099999
 best_loss = float('inf')
@@ -299,138 +310,143 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 
-# Add these compression utility functions after imports
-def save_compressed_model(state_dict, filepath):
-    """Save model state dict in compressed format"""
-    # Convert model state to buffer
-    buffer = io.BytesIO()
-    torch.save(state_dict, buffer, _use_new_zipfile_serialization=False)
-    buffer.seek(0)
-    
-    # Save compressed file
-    with zipfile.ZipFile(filepath + '.zip', 'w', zipfile.ZIP_DEFLATED) as f:
-        f.writestr('model.pth', buffer.getvalue())
-    
-    print(f"Compressed model saved to {filepath}.zip")
-
-def load_compressed_model(filepath):
-    """Load model state dict from compressed format"""
-    if not os.path.exists(filepath + '.zip'):
-        print(f"No checkpoint found at {filepath}.zip, starting fresh training")
-        return None
-        
-    print(f"Loading compressed checkpoint from {filepath}.zip")
-    
-    # Read compressed file
-    with zipfile.ZipFile(filepath + '.zip', 'r') as f:
-        with f.open('model.pth') as model_file:
-            buffer = io.BytesIO(model_file.read())
-            state_dict = torch.load(buffer)
-    
-    return state_dict
-
-# Modify the load_checkpoint function
-def load_checkpoint(checkpoint_path):
-    """Load checkpoint with compression support"""
-    state_dict = load_compressed_model(checkpoint_path)
-    if state_dict is None:
-        return 0, float('inf')
-        
-    model.load_state_dict(state_dict['model_state_dict'])
-    optimizer.load_state_dict(state_dict['optimizer_state_dict'])
-    return state_dict['epoch'], state_dict['loss']
-
-
 # Add before training loop
 checkpoint_dir = Path("checkpoints")
 checkpoint_dir.mkdir(exist_ok=True)
 best_model_path =  os.path.join(checkpoint_dir, "best_model.pth")
 final_model_path = os.path.join(checkpoint_dir, "final_model.pth")
 
-# Modify the training loop
-epoch_size = len(train_loader.tokens) // (train_loader.B * train_loader.T)
-current_epoch, best_loss = load_checkpoint(os.path.join(checkpoint_dir, best_model_path))
-steps_per_epoch = epoch_size
 
-print(f"Training for {max_steps} steps)")
-print(f"Steps per epoch: {steps_per_epoch}")
+# Load previous best model if exists
+if os.path.exists(best_model_path):
+    print(f"Loading previous best model from {best_model_path}")
+    model = GPT(GPTConfig())
+    load_compressed_model(model, best_model_path)
+    model.to(device)
+else:
+    model = GPT(GPTConfig())
+    model.to(device)
 
+
+total_params, trainable_params = count_parameters(model)
+
+print("\nModel Architecture:")
+print("=" * 50)
+print(model)
+print("\nParameter Count:")
+print("=" * 50)
+print(f"Total Parameters: {total_params:,}")
+print(f"Trainable Parameters: {trainable_params:,}")
+print(f"Non-trainable Parameters: {total_params - trainable_params:,}")
+print("=" * 50)
+
+
+# Initialize data loader
+train_loader = DataLoaderLite(B=32, T=64)  # Increased from B=4, T=32
+num_epochs = 50  # Define number of epochs
+steps_per_epoch = len(train_loader.tokens) // (train_loader.B * train_loader.T)
+
+# Continue with existing code
 # Add gradient accumulation
 gradient_accumulation_steps = 4
 effective_batch_size = train_loader.B * gradient_accumulation_steps
-
 # Modify the training loop
-for step in range(max_steps):
-    t0 = time.time()
-    
-    # Update learning rate
-    current_lr = get_lr(step)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = current_lr
-    
-    # Initialize accumulated gradients
-    accumulated_loss = 0
-    optimizer.zero_grad(set_to_none=True)
-    
-    # Gradient accumulation loop
-    for _ in range(gradient_accumulation_steps):
-        # Get batch and move to device
-        x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
-        
-        # Forward pass with mixed precision
-        with autocast(device_type=device):
+# epoch_size = len(train_loader.tokens) // (train_loader.B * train_loader.T)
+# Learning rate scheduler
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 
+                                                          T_max=num_epochs * steps_per_epoch,
+                                                          eta_min=1e-5)
+for epoch in range(num_epochs):
+        epoch_loss = 0
+        for step in range(steps_per_epoch):
+            x, y = train_loader.next_batch()
+            x, y = x.to(device), y.to(device)
+            optimizer.zero_grad()
             logits, loss = model(x, y)
-            loss = loss / gradient_accumulation_steps  # Scale loss
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            scheduler.step()
+            epoch_loss += loss.item()
+            
+            if step % 10 == 0:  # Print every 10 steps
+                print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, Loss: {loss.item():.4f}')
         
-        # Backward pass with gradient scaling
-        scaler.scale(loss).backward()
-        accumulated_loss += loss.item()
+        # Print epoch summary
+        avg_loss = epoch_loss / steps_per_epoch
+        print(f'\nEpoch {epoch+1} Summary:')
+        print(f'Average Loss: {avg_loss:.4f}\n')
+        
+        # Save best model
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            print(f"New best loss: {best_loss:.4f}, saving model to {final_model_path}")
+            save_compressed_model(model, final_model_path)
+
+
+# print(f"Training for {max_steps} steps")
+# print(f"Steps per epoch: {steps_per_epoch}")
+# # Modify the training loop
+# for step in range(max_steps):
+#     t0 = time.time()
     
-    # Gradient clipping
-    scaler.unscale_(optimizer)
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+#     # Update learning rate
+#     current_lr = get_lr(step)
+#     for param_group in optimizer.param_groups:
+#         param_group['lr'] = current_lr
     
-    # Optimizer step with gradient scaling
-    scaler.step(optimizer)
-    scaler.update()
+#     # Initialize accumulated gradients
+#     accumulated_loss = 0
+#     optimizer.zero_grad(set_to_none=True)
     
-    current_loss = accumulated_loss
-    best_loss = min(best_loss, current_loss)
+#     # Gradient accumulation loop
+#     for _ in range(gradient_accumulation_steps):
+#         # Get batch and move to device
+#         x, y = train_loader.next_batch()
+#         x, y = x.to(device), y.to(device)
+        
+#         # Forward pass with mixed precision
+#         with autocast(device_type=device):
+#             logits, loss = model(x, y)
+#             loss = loss / gradient_accumulation_steps  # Scale loss
+        
+#         # Backward pass with gradient scaling
+#         scaler.scale(loss).backward()
+#         accumulated_loss += loss.item()
     
-    if step % 10 == 0:
-        dt = time.time() - t0
-        print(f'step {step} | '
-              f'loss: {current_loss:.4f} | best_loss: {best_loss:.4f} | '
-              f'lr: {current_lr:.2e} | time: {dt:.2f}s | '
-              f'effective_batch: {effective_batch_size}')
+#     # Gradient clipping
+#     scaler.unscale_(optimizer)
+#     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    
+#     # Optimizer step with gradient scaling
+#     scaler.step(optimizer)
+#     scaler.update()
+    
+#     current_loss = accumulated_loss
+#     best_loss = min(best_loss, current_loss)
+    
+#     if step % 10 == 0:
+#         dt = time.time() - t0
+#         print(f'step {step} | '
+#               f'loss: {current_loss:.4f} | best_loss: {best_loss:.4f} | '
+#               f'lr: {current_lr:.2e} | time: {dt:.2f}s | '
+#               f'effective_batch: {effective_batch_size}')
 
     
-    # Save best model if we have a new best loss
-    if current_loss < best_loss:
-        save_compressed_model({
-            'epoch': current_epoch + 1,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss': current_loss,   
-        }, best_model_path)
-        print(f"Saved new best model with loss: {current_loss:.4f} at path: {best_model_path}.zip")
+#     # Save best model if we have a new best loss
+#     if current_loss < best_loss:
+#         save_compressed_model(model, best_model_path)
+#         print(f"Saved new best model with loss: {current_loss:.4f} at path: {best_model_path}.gz")
     
-    # Early stopping
-    if best_loss < target_loss:
-        print(f"Reached target loss of {target_loss} at step {step} (epoch {current_epoch + 1})")
-        break
+#     # Early stopping
+#     if best_loss < target_loss:
+#         print(f"Reached target loss of {target_loss} at step {step}")
+#         break
 
-# Save final model
-save_compressed_model({
-    'epoch': current_epoch + 1,
-    'model_state_dict': model.state_dict(),
-    'optimizer_state_dict': optimizer.state_dict(),
-    'final_loss': loss.item(),
-    'best_loss': best_loss,
-}, final_model_path)
+# # Save final model
+# save_compressed_model(model, final_model_path)
 
 print(f"Training completed. Final loss: {loss.item():.6f}")
 print(f"Best loss achieved: {best_loss:.6f}")
-print(f"Final model saved to: {final_model_path}.zip")
-print(f"Best model saved to: {best_model_path}.zip")
+print(f"Final model saved to: {final_model_path}.gz")
+print(f"Best model saved to: {best_model_path}.gz")
