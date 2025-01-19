@@ -9,6 +9,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.amp import autocast, GradScaler  # Add GradScaler back
 from pathlib import Path
+import io
+import zipfile
 
 
 class CausalSelfAttention(nn.Module):
@@ -273,7 +275,7 @@ initial_lr = 6e-4  # Increased from 6e-4
 max_lr = 6e-4 
 min_lr = max_lr * 0.1    # Increased from 1e-5
 warmup_steps = 10  # Increased from 1000
-max_steps = 50  # Increased from 5000
+max_steps = 100  # Increased from 5000
 
 # Create optimizer with modified parameters
 optimizer = torch.optim.AdamW(
@@ -297,16 +299,46 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 
-# Function to load checkpoint (add this for future use)
+# Add these compression utility functions after imports
+def save_compressed_model(state_dict, filepath):
+    """Save model state dict in compressed format"""
+    # Convert model state to buffer
+    buffer = io.BytesIO()
+    torch.save(state_dict, buffer, _use_new_zipfile_serialization=False)
+    buffer.seek(0)
+    
+    # Save compressed file
+    with zipfile.ZipFile(filepath + '.zip', 'w', zipfile.ZIP_DEFLATED) as f:
+        f.writestr('model.pth', buffer.getvalue())
+    
+    print(f"Compressed model saved to {filepath}.zip")
+
+def load_compressed_model(filepath):
+    """Load model state dict from compressed format"""
+    if not os.path.exists(filepath + '.zip'):
+        print(f"No checkpoint found at {filepath}.zip, starting fresh training")
+        return None
+        
+    print(f"Loading compressed checkpoint from {filepath}.zip")
+    
+    # Read compressed file
+    with zipfile.ZipFile(filepath + '.zip', 'r') as f:
+        with f.open('model.pth') as model_file:
+            buffer = io.BytesIO(model_file.read())
+            state_dict = torch.load(buffer)
+    
+    return state_dict
+
+# Modify the load_checkpoint function
 def load_checkpoint(checkpoint_path):
-    if os.path.exists(checkpoint_path):
-        print(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        return checkpoint['epoch'], checkpoint['loss']
-    print(f"No checkpoint found at {checkpoint_path}, starting fresh training")
-    return 0, float('inf')
+    """Load checkpoint with compression support"""
+    state_dict = load_compressed_model(checkpoint_path)
+    if state_dict is None:
+        return 0, float('inf')
+        
+    model.load_state_dict(state_dict['model_state_dict'])
+    optimizer.load_state_dict(state_dict['optimizer_state_dict'])
+    return state_dict['epoch'], state_dict['loss']
 
 
 # Add before training loop
@@ -376,13 +408,13 @@ for step in range(max_steps):
     
     # Save best model if we have a new best loss
     if current_loss < best_loss:
-        torch.save({
+        save_compressed_model({
             'epoch': current_epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'loss': current_loss,
+            'loss': current_loss,   
         }, best_model_path)
-        print(f"Saved new best model with loss: {current_loss:.4f} at path: {checkpoint_path}")
+        print(f"Saved new best model with loss: {current_loss:.4f} at path: {best_model_path}.zip")
     
     # Early stopping
     if best_loss < target_loss:
@@ -390,7 +422,7 @@ for step in range(max_steps):
         break
 
 # Save final model
-torch.save({
+save_compressed_model({
     'epoch': current_epoch + 1,
     'model_state_dict': model.state_dict(),
     'optimizer_state_dict': optimizer.state_dict(),
@@ -400,5 +432,5 @@ torch.save({
 
 print(f"Training completed. Final loss: {loss.item():.6f}")
 print(f"Best loss achieved: {best_loss:.6f}")
-print(f"Final model saved to: {final_model_path}")
-print(f"Best model saved to: {best_model_path}")
+print(f"Final model saved to: {final_model_path}.zip")
+print(f"Best model saved to: {best_model_path}.zip")
