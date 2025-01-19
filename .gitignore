@@ -1,0 +1,6 @@
+data/*
+path/*
+__pycache*
+*.pyc
+.gradio
+.DS_Store
