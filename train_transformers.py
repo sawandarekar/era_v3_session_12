@@ -13,6 +13,9 @@ import io
 import zipfile
 import pickle
 import gzip
+from datetime import datetime, timedelta
+from torch.optim.lr_scheduler import OneCycleLR
+from tqdm import tqdm, trange
 
 
 class CausalSelfAttention(nn.Module):
@@ -84,11 +87,16 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024 # max sequence length
-    vocab_size: int = 50257 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 12 # number of layers
-    n_head: int = 12 # number of heads
-    n_embd: int = 768 # embedding dimension
+    # block_size: int = 1024 # max sequence length
+    # vocab_size: int = 50257 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
+    # n_layer: int = 12 # number of layers
+    # n_head: int = 12 # number of heads
+    # n_embd: int = 768 # embedding dimension
+    block_size: int = 1024
+    vocab_size: int = 50257
+    n_layer: int = 12  # Reduced number of layers
+    n_head: int = 12   # Reduced number of heads
+    n_embd: int = 768 # Reduced embedding dimension
 
 
 class GPT(nn.Module):
@@ -281,34 +289,39 @@ def count_parameters(model):
 target_loss = 0.099999
 best_loss = float('inf')
 
-# Modified learning rate parameters
-initial_lr = 6e-4  # Increased from 6e-4
-max_lr = 6e-4 
-min_lr = max_lr * 0.1    # Increased from 1e-5
-warmup_steps = 10  # Increased from 1000
-max_steps = 100  # Increased from 5000
+# Update hyperparameters
+initial_lr = 1e-3
+min_lr = 1e-4
+batch_size = 16  # Reduced batch size for better gradient updates
+context_length = 32  # Reduced context length
+accumulation_steps = 2  # Reduced accumulation steps
+
+# Initialize data loader with new batch size
+train_loader = DataLoaderLite(B=batch_size, T=context_length)
+num_epochs = 10  # Define number of epochs
+steps_per_epoch = len(train_loader.tokens) // (train_loader.B * train_loader.T)
 
 # Create optimizer with modified parameters
 optimizer = torch.optim.AdamW(
-    model.parameters(), 
+    model.parameters(),
     lr=initial_lr,
-    betas=(0.9, 0.95),  # Modified beta2
+    betas=(0.9, 0.95),
     eps=1e-8,
-    weight_decay=0.2    # Increased from 0.1
+    weight_decay=0.1
 )
 
 scaler = GradScaler()
 
-def get_lr(it):
-    if it < warmup_steps:
-        return max_lr * (it + 1) / warmup_steps
-    if it > max_steps:
-        return min_lr
-    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
-    assert 0 <= decay_ratio <=1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    return min_lr + coeff * (max_lr - min_lr)
-
+# Better learning rate scheduler
+scheduler = OneCycleLR(
+    optimizer,
+    max_lr=initial_lr,
+    total_steps=num_epochs * steps_per_epoch,
+    pct_start=0.1,  # Warm up for 10% of training
+    div_factor=10,  # min_lr = initial_lr/10
+    final_div_factor=10,  # final_lr = min_lr/10
+    anneal_strategy='cos'
+)
 
 # Add before training loop
 checkpoint_dir = Path("checkpoints")
@@ -340,117 +353,113 @@ print(f"Trainable Parameters: {trainable_params:,}")
 print(f"Non-trainable Parameters: {total_params - trainable_params:,}")
 print("=" * 50)
 
+# Add before training loop
+def format_time(seconds):
+    """Convert seconds to human readable string"""
+    return str(timedelta(seconds=int(seconds)))
 
-# Initialize data loader
-train_loader = DataLoaderLite(B=32, T=64)  # Increased from B=4, T=32
-num_epochs = 50  # Define number of epochs
-steps_per_epoch = len(train_loader.tokens) // (train_loader.B * train_loader.T)
+# Modified training loop with timing
+print(f"\nStarting training at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+training_start = time.time()
 
-# Continue with existing code
-# Add gradient accumulation
-gradient_accumulation_steps = 4
-effective_batch_size = train_loader.B * gradient_accumulation_steps
-# Modify the training loop
-# epoch_size = len(train_loader.tokens) // (train_loader.B * train_loader.T)
-# Learning rate scheduler
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 
-                                                          T_max=num_epochs * steps_per_epoch,
-                                                          eta_min=1e-5)
-for epoch in range(num_epochs):
-        epoch_time = time.time()
-        epoch_loss = 0
-        for step in range(steps_per_epoch):
-            step_time = time.time()
-            x, y = train_loader.next_batch()
-            x, y = x.to(device), y.to(device)
-            optimizer.zero_grad()
+# Create epoch progress bar
+for epoch in trange(num_epochs, desc="Training", unit="epoch"):
+    epoch_start = time.time()
+    model.train()
+    epoch_loss = 0
+    optimizer.zero_grad(set_to_none=True)
+    accumulated_loss = 0
+    
+    print(f"\nEpoch {epoch+1}/{num_epochs}")
+    print("=" * 50)
+    
+    # Create step progress bar
+    pbar = tqdm(range(steps_per_epoch), desc=f"Epoch {epoch+1}", 
+                leave=False, unit="batch")
+    
+    for step in pbar:
+        step_start = time.time()
+        
+        # Get batch
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+        
+        # For MPS/CPU training, modify the autocast context
+        if device == 'cuda':
+            ctx_manager = autocast(device_type='cuda')
+        else:
+            ctx_manager = autocast(device_type='cpu')
+        
+        # Forward pass with gradient scaling
+        with ctx_manager:
             logits, loss = model(x, y)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            scheduler.step()
-            epoch_loss += loss.item()
+            loss = loss / accumulation_steps
+        
+        # Backward pass with gradient scaling
+        scaler.scale(loss).backward()
+        accumulated_loss += loss.item()
+        
+        # Step optimizer after accumulation
+        if (step + 1) % accumulation_steps == 0:
+            # Unscale gradients for clipping
+            scaler.unscale_(optimizer)
             
-            if step % 10 == 0:  # Print every 10 steps
-                dt = time.time() - step_time
-                print(f'Epoch {epoch+1}/{num_epochs} | Step {step}/{steps_per_epoch} | Loss: {loss.item():.4f} | time: {dt:.2f}s')
-        
-        # Print epoch summary
-        dt = time.time() - epoch_time
-        avg_loss = epoch_loss / steps_per_epoch
-        print(f'\nEpoch {epoch+1} Average Loss: {avg_loss:.4f} | time: {dt:.2f}s\n')
-        
-        
-        # Save best model
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            print(f"New best loss: {best_loss:.4f}, saving model to {final_model_path}")
-            save_compressed_model(model, final_model_path)
+            # Clip gradients
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), 
+                max_norm=0.5
+            )
+            
+            # Optimizer and scheduler step
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+            
+            # Update metrics
+            epoch_loss += accumulated_loss
+            accumulated_loss = 0
+            
+            # Update progress bar
+            current_lr = scheduler.get_last_lr()[0]
+            elapsed = time.time() - training_start
+            remaining = (elapsed / (epoch * steps_per_epoch + step + 1)) * \
+                       (num_epochs * steps_per_epoch - (epoch * steps_per_epoch + step + 1))
+            
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'lr': f'{current_lr:.2e}',
+                'elapsed': format_time(elapsed),
+                'remaining': format_time(remaining)
+            })
 
-
-# print(f"Training for {max_steps} steps")
-# print(f"Steps per epoch: {steps_per_epoch}")
-# # Modify the training loop
-# for step in range(max_steps):
-#     t0 = time.time()
+    # Calculate average loss and epoch timing
+    epoch_time = time.time() - epoch_start
+    avg_loss = epoch_loss / (steps_per_epoch / accumulation_steps)
     
-#     # Update learning rate
-#     current_lr = get_lr(step)
-#     for param_group in optimizer.param_groups:
-#         param_group['lr'] = current_lr
+    print(f'\nEpoch {epoch+1} | Average Loss: {avg_loss:.4f} | Best Loss: {best_loss:.4f}| Epoch Time: {format_time(epoch_time)} | Total Time: {format_time(time.time() - training_start)}')
+    # print("=" * 50)
     
-#     # Initialize accumulated gradients
-#     accumulated_loss = 0
-#     optimizer.zero_grad(set_to_none=True)
-    
-#     # Gradient accumulation loop
-#     for _ in range(gradient_accumulation_steps):
-#         # Get batch and move to device
-#         x, y = train_loader.next_batch()
-#         x, y = x.to(device), y.to(device)
+    # Save best model
+    if avg_loss < best_loss:
+        best_loss = avg_loss
+        print(f"New best loss: {best_loss:.4f}")
+        save_compressed_model(model, best_model_path)
+        print(f"Best model saved at epoch {epoch+1}")
         
-#         # Forward pass with mixed precision
-#         with autocast(device_type=device):
-#             logits, loss = model(x, y)
-#             loss = loss / gradient_accumulation_steps  # Scale loss
-        
-#         # Backward pass with gradient scaling
-#         scaler.scale(loss).backward()
-#         accumulated_loss += loss.item()
-    
-#     # Gradient clipping
-#     scaler.unscale_(optimizer)
-#     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    
-#     # Optimizer step with gradient scaling
-#     scaler.step(optimizer)
-#     scaler.update()
-    
-#     current_loss = accumulated_loss
-#     best_loss = min(best_loss, current_loss)
-    
-#     if step % 10 == 0:
-#         dt = time.time() - t0
-#         print(f'step {step} | '
-#               f'loss: {current_loss:.4f} | best_loss: {best_loss:.4f} | '
-#               f'lr: {current_lr:.2e} | time: {dt:.2f}s | '
-#               f'effective_batch: {effective_batch_size}')
+    # Early stopping check
+    if best_loss < target_loss:
+        print(f"Reached target loss of {target_loss} at epoch {epoch+1}")
+        break
 
-    
-#     # Save best model if we have a new best loss
-#     if current_loss < best_loss:
-#         save_compressed_model(model, best_model_path)
-#         print(f"Saved new best model with loss: {current_loss:.4f} at path: {best_model_path}.gz")
-    
-#     # Early stopping
-#     if best_loss < target_loss:
-#         print(f"Reached target loss of {target_loss} at step {step}")
-#         break
-
-# # Save final model
-# save_compressed_model(model, final_model_path)
-
-print(f"Training completed. Final loss: {loss.item():.6f}")
-print(f"Best loss achieved: {best_loss:.6f}")
-print(f"Final model saved to: {final_model_path}.gz")
-print(f"Best model saved to: {best_model_path}.gz")
+# Training summary
+total_time = time.time() - training_start
+print("\nTraining Summary:")
+print("=" * 50)
+print(f"Total Training Time: {format_time(total_time)}")
+print(f"Final Loss: {loss.item():.6f}")
+print(f"Best Loss Achieved: {best_loss:.6f}")
+print(f"Final Model: {final_model_path}.gz")
+print(f"Best Model: {best_model_path}.gz")
+print(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+print("=" * 50)
