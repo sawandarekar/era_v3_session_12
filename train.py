@@ -310,7 +310,7 @@ print("=" * 50)
 
 train_loader = DataLoaderLite(B = 4, T = 32)
 
-num_epochs = 10  # Define number of epochs
+num_epochs = 100  # Define number of epochs
 steps_per_epoch = len(train_loader.tokens) // (train_loader.B * train_loader.T)
 
 # NEW CODE
