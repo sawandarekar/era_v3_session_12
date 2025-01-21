@@ -308,18 +308,34 @@ print(f"Trainable Parameters: {trainable_params:,}")
 print(f"Non-trainable Parameters: {total_params - trainable_params:,}")
 print("=" * 50)
 
-train_loader = DataLoaderLite(B = 4, T = 32)
+# train_loader = DataLoaderLite(B = 4, T = 32)
+train_loader = DataLoaderLite(B = 8, T = 128)
 
 num_epochs = 100  # Define number of epochs
 steps_per_epoch = len(train_loader.tokens) // (train_loader.B * train_loader.T)
 
 # NEW CODE
-optimizer = torch.optim.AdamW(model.parameters(), lr = 3e-4)
+# Update hyperparameters
+initial_lr = 1e-4  # Reduce the initial learning rate
+min_lr = 1e-4  # Reduce the minimum learning rate
+num_epochs = 200  # Increase the number of epochs
+
+# Create optimizer with modified parameters
+optimizer = torch.optim.AdamW(
+    model.parameters(),
+    lr=initial_lr,
+    betas=(0.9, 0.95),
+    eps=1e-8,
+    weight_decay=0.1
+)
+
+# optimizer = torch.optim.AdamW(model.parameters(), lr = 3e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
 target_loss = 0.099999
 best_loss = float('inf')
-
+print(f"Training for {num_epochs} epochs with {steps_per_epoch} steps per epoch on {device} with best loss: {best_loss:.4f}")
+print("-" * 50)
 training_start = time.time()
 for epoch in range(num_epochs):
         epoch_start = time.time()
@@ -330,25 +346,25 @@ for epoch in range(num_epochs):
             optimizer.zero_grad()
             logits, loss = model(x, y)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # Gradient clippings
             optimizer.step()
             current_loss = loss.item()
             epoch_loss += current_loss
             
-            # best_loss = min(best_loss, current_loss)
+            best_loss = min(best_loss, current_loss)
             
             if step % 100 == 0:  # Print every 100 steps
-                print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, Loss: {loss.item():.4f}')
+                print(f'Epoch {epoch}/{num_epochs}, Step {step}/{steps_per_epoch}, Loss: {loss.item():.4f}')
         
         avg_loss = epoch_loss / steps_per_epoch
         scheduler.step()
-        print(f'Epoch {epoch}, Loss: {avg_loss:.6f} | Total Time: {format_time(time.time() - epoch_start)}')
-
+        print(f'Epoch {epoch}, avg_loss: {avg_loss:.6f} | Total Time: {format_time(time.time() - epoch_start)} {avg_loss < best_loss}')
+        print("-" * 50)
         # Save best model
         if avg_loss < best_loss:
             best_loss = avg_loss
-            print(f"New best loss: {best_loss:.4f}")
             save_compressed_model(model, best_model_path)
-            print(f"Best model saved at epoch {epoch+1}")
+            print(f"New best loss: {best_loss:.4f} Best model saved at epoch {epoch+1}")
             
         # Early stopping check
         if best_loss < target_loss:
@@ -356,7 +372,7 @@ for epoch in range(num_epochs):
             break
     
 
-save_compressed_model(model, best_model_path)   
+save_compressed_model(model, final_model_path)   
 
 # Training summary
 total_time = time.time() - training_start
