@@ -251,8 +251,29 @@ class DataLoaderLite:
             self.current_position = 0
         return x, y
 
+# def save_compressed_model(model, path):
+#     """Save model with compression"""
+#     state_dict = model.state_dict()
+#     # Convert tensors to half precision
+#     for key in state_dict:
+#         if state_dict[key].dtype == torch.float32:
+#             state_dict[key] = state_dict[key].half()
+#     # Compress and save
+#     with gzip.open(path, 'wb', compresslevel=9) as f:
+#         pickle.dump(state_dict, f)
+
+# def load_compressed_model(model, path):
+#     """Load compressed model"""
+#     with gzip.open(path, 'rb') as f:
+#         state_dict = pickle.load(f)
+#     # Convert back to float32 for training
+#     for key in state_dict:
+#         if state_dict[key].dtype == torch.float16:
+#             state_dict[key] = state_dict[key].float()
+#     model.load_state_dict(state_dict)
+
 def save_compressed_model(model, path):
-    """Save model with compression"""
+    """Save model with compression using torch.save"""
     state_dict = model.state_dict()
     # Convert tensors to half precision
     for key in state_dict:
@@ -260,17 +281,18 @@ def save_compressed_model(model, path):
             state_dict[key] = state_dict[key].half()
     # Compress and save
     with gzip.open(path, 'wb', compresslevel=9) as f:
-        pickle.dump(state_dict, f)
+        torch.save(state_dict, f)  # Use torch.save for portability
 
-def load_compressed_model(model, path):
-    """Load compressed model"""
-    with gzip.open(path, 'rb') as f:
-        state_dict = pickle.load(f)
+def load_compressed_model(model, checkpoint_path, device):
+    """Load compressed model using torch.load"""
+    with gzip.open(checkpoint_path, 'rb') as f:
+        state_dict = torch.load(f, map_location=device)  # Use torch.load for portability
     # Convert back to float32 for training
     for key in state_dict:
         if state_dict[key].dtype == torch.float16:
             state_dict[key] = state_dict[key].float()
     model.load_state_dict(state_dict)
+    model.to(device)
 
 model = GPT(GPTConfig())
 model.to(device)
@@ -278,13 +300,13 @@ model.to(device)
 # Add before training loop
 checkpoint_dir = Path("checkpoints")
 checkpoint_dir.mkdir(exist_ok=True)
-best_model_path =  os.path.join(checkpoint_dir, "best_model.pth")
-final_model_path = os.path.join(checkpoint_dir, "final_model.pth")
+best_model_path =  os.path.join(checkpoint_dir, "final_model.pt")
+final_model_path = os.path.join(checkpoint_dir, "final_model.pt")
 # Load previous best model if exists
 if os.path.exists(best_model_path):
     print(f"Loading previous best model from {best_model_path}")
     model = GPT(GPTConfig())
-    load_compressed_model(model, best_model_path)
+    load_compressed_model(model, best_model_path, device=device)
     model.to(device)
 else:
     model = GPT(GPTConfig())
@@ -364,11 +386,11 @@ for epoch in range(num_epochs):
         if avg_loss < best_loss:
             best_loss = avg_loss
             save_compressed_model(model, best_model_path)
-            print(f"New best loss: {best_loss:.4f} Best model saved at epoch {epoch+1}")
+            print(f"New best loss: {best_loss:.4f} Best model saved at epoch:{epoch} at path:{best_model_path}")
             
         # Early stopping check
         if best_loss < target_loss:
-            print(f"Reached target loss of {target_loss} at epoch {epoch+1}")
+            print(f"Reached target loss of {target_loss} at epoch {epoch}")
             break
     
 
@@ -381,8 +403,8 @@ print("=" * 50)
 print(f"Total Training Time: {(total_time):.4f}")
 print(f"Final Loss: {loss.item():.6f}")
 print(f"Best Loss Achieved: {best_loss:.6f}")
-print(f"Final Model: {final_model_path}.gz")
-print(f"Best Model: {best_model_path}.gz")
+print(f"Final Model: {final_model_path}")
+print(f"Best Model: {best_model_path}")
 print(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print("=" * 50)
 

@@ -188,16 +188,14 @@ class GPT(nn.Module):
 
         return model
 
-def load_compressed_model(model, checkpoint_path, device):
-    """Load compressed model using torch.load"""
+def load_compressed_model(model, checkpoint_path):
     with gzip.open(checkpoint_path, 'rb') as f:
-        state_dict = torch.load(f, map_location=device)  # Use torch.load for portability
+        state_dict = pickle.load(f)
     # Convert back to float32 for training
     for key in state_dict:
         if state_dict[key].dtype == torch.float16:
             state_dict[key] = state_dict[key].float()
     model.load_state_dict(state_dict)
-    model.to(device)
 
 def get_device():
     if torch.cuda.is_available():
@@ -214,7 +212,7 @@ device = get_device()
 tokenizer = tiktoken.get_encoding('gpt2')
 model = GPT(GPTConfig())
 
-load_compressed_model(model, 'final_model.pt', device)
+load_compressed_model(model, 'checkpoints/final_model.pth')
 
 # load_compressed_model(model, 'final_model.pth')
 
